@@ -43,6 +43,7 @@ function colLabel(idx: number): string {
 export function CashflowUploader({ onSuccess }: Props) {
   const [dragging, setDragging] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [loadingMsg, setLoadingMsg] = useState("Processando...")
   const [status, setStatus] = useState<"idle" | "success" | "error">("idle")
   const [info, setInfo] = useState<{ count: number; filename: string; meta?: ParseMeta } | null>(null)
 
@@ -52,41 +53,50 @@ export function CashflowUploader({ onSuccess }: Props) {
       return
     }
 
-    if (file.size > 20 * 1024 * 1024) {
-      toast.error("Arquivo muito grande. Tamanho máximo: 20MB")
-      return
-    }
-
     setLoading(true)
+    setLoadingMsg("Lendo planilha...")
     setStatus("idle")
+
     try {
-      const fd = new FormData()
-      fd.append("file", file)
-      const res = await fetch("/api/cashflow", { method: "POST", body: fd })
+      // Processar Excel no navegador para evitar limite de tamanho no servidor
+      const buffer = await file.arrayBuffer()
+
+      setLoadingMsg("Detectando colunas...")
+      const { parseCashflowExcel } = await import("@/lib/excel")
+      const { entries, meta } = parseCashflowExcel(buffer)
+
+      if (!entries.length) {
+        throw new Error(
+          `Nenhum dado encontrado. Verifique se a aba se chama "${meta.sheetName}" e se as colunas A, K, L, M existem.`
+        )
+      }
+
+      setLoadingMsg(`Enviando ${entries.length} registros...`)
+
+      // Envia só o JSON (sem o arquivo), sem limite de tamanho
+      const res = await fetch("/api/cashflow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entries, filename: file.name, meta }),
+      })
 
       let data: Record<string, unknown>
-      const contentType = res.headers.get("content-type") ?? ""
-      if (contentType.includes("application/json")) {
+      const ct = res.headers.get("content-type") ?? ""
+      if (ct.includes("application/json")) {
         data = await res.json()
       } else {
-        const text = await res.text()
-        if (res.status === 413) {
-          throw new Error("Arquivo muito grande para o servidor. Tente um período menor de dados.")
-        }
-        throw new Error(`Erro do servidor (${res.status}): ${text.slice(0, 120)}`)
+        throw new Error(`Erro do servidor (${res.status})`)
       }
 
       if (!res.ok) throw new Error((data.error as string) ?? "Erro desconhecido")
 
       setStatus("success")
-      setInfo({ count: data.count as number, filename: data.filename as string, meta: data.meta as ParseMeta })
+      setInfo({ count: data.count as number, filename: data.filename as string, meta })
       onSuccess?.({ count: data.count as number, filename: data.filename as string })
 
-      const meta = data.meta as ParseMeta | undefined
-      const hasManualFallback = meta && Object.values(meta.columns).some(
-        (c) => "detected" in c && !(c as ColumnMeta).detected
+      const hasManualFallback = Object.entries(meta.columns).some(
+        ([key, c]) => key !== "date" && !(c as ColumnMeta).detected
       )
-
       if (hasManualFallback) {
         toast.warning("Algumas colunas usaram posição padrão. Confira o mapeamento abaixo.")
       } else {
@@ -130,7 +140,9 @@ export function CashflowUploader({ onSuccess }: Props) {
           )}
 
           <div className="text-center">
-            {status === "success" && info ? (
+            {loading ? (
+              <p className="font-semibold text-[#099CD6]">{loadingMsg}</p>
+            ) : status === "success" && info ? (
               <>
                 <p className="font-semibold text-green-700">Importado com sucesso!</p>
                 <p className="text-sm text-muted-foreground">
@@ -145,25 +157,27 @@ export function CashflowUploader({ onSuccess }: Props) {
             )}
           </div>
 
-          <label className="cursor-pointer">
-            <Button variant="outline" size="sm" className="pointer-events-none" asChild>
-              <span>
-                <Upload className="h-4 w-4" />
-                {status === "success" ? "Reimportar" : "Selecionar arquivo"}
-              </span>
-            </Button>
-            <input
-              type="file"
-              accept=".xls,.xlsx"
-              className="hidden"
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = "" }}
-            />
-          </label>
+          {!loading && (
+            <label className="cursor-pointer">
+              <Button variant="outline" size="sm" className="pointer-events-none" asChild>
+                <span>
+                  <Upload className="h-4 w-4" />
+                  {status === "success" ? "Reimportar" : "Selecionar arquivo"}
+                </span>
+              </Button>
+              <input
+                type="file"
+                accept=".xls,.xlsx"
+                className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = "" }}
+              />
+            </label>
+          )}
         </CardContent>
       </Card>
 
       {/* Mapeamento de colunas detectadas */}
-      {meta && (
+      {meta && !loading && (
         <div className={cn(
           "rounded-lg border p-4 text-sm space-y-3",
           hasWarning ? "border-yellow-300 bg-yellow-50" : "border-green-200 bg-green-50"
@@ -175,10 +189,10 @@ export function CashflowUploader({ onSuccess }: Props) {
               <Info className="h-4 w-4 text-green-600" />
             )}
             <span className={hasWarning ? "text-yellow-800" : "text-green-800"}>
-              Mapeamento detectado — Aba: <strong>{meta.sheetName}</strong>
+              Aba detectada: <strong>{meta.sheetName}</strong>
               {meta.availableSheets.length > 1 && (
-                <span className="font-normal text-muted-foreground ml-1">
-                  (abas disponíveis: {meta.availableSheets.join(", ")})
+                <span className="font-normal text-muted-foreground ml-1 text-xs">
+                  (disponíveis: {meta.availableSheets.join(", ")})
                 </span>
               )}
             </span>
@@ -203,12 +217,12 @@ export function CashflowUploader({ onSuccess }: Props) {
                       {col.header}
                     </span>
                     {key !== "date" && !col.detected && (
-                      <Badge variant="outline" className="text-[10px] border-yellow-400 text-yellow-700 ml-auto">
+                      <Badge variant="outline" className="text-[10px] border-yellow-400 text-yellow-700 ml-auto shrink-0">
                         padrão
                       </Badge>
                     )}
                     {(key === "date" || col.detected) && (
-                      <Badge variant="outline" className="text-[10px] border-green-400 text-green-700 ml-auto">
+                      <Badge variant="outline" className="text-[10px] border-green-400 text-green-700 ml-auto shrink-0">
                         auto
                       </Badge>
                     )}
@@ -220,9 +234,8 @@ export function CashflowUploader({ onSuccess }: Props) {
 
           {hasWarning && (
             <p className="text-xs text-yellow-700">
-              Colunas marcadas como &quot;padrão&quot; não foram encontradas pelo cabeçalho e usaram
-              posição fixa. Se os valores estiverem errados, verifique se o arquivo contém os
-              cabeçalhos &quot;A RECEBER&quot;, &quot;A PAGAR&quot; e &quot;SALDO&quot; na linha {meta.headerRowIndex + 1}.
+              Colunas &quot;padrão&quot; não foram encontradas pelo cabeçalho e usaram posição fixa.
+              Verifique se a planilha tem os cabeçalhos &quot;A RECEBER&quot;, &quot;A PAGAR&quot; e &quot;SALDO&quot;.
             </p>
           )}
         </div>

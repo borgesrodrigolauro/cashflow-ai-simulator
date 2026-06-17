@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/db"
-import { parseCashflowExcel } from "@/lib/excel"
 import { buildSessionCookie } from "@/lib/session"
 import { v4 as uuidv4 } from "uuid"
+import type { CashflowEntry } from "@/lib/types"
 
 async function resolveSession(req: Request): Promise<string> {
   const cookieHeader = req.headers.get("cookie") ?? ""
@@ -20,14 +20,11 @@ async function resolveSession(req: Request): Promise<string> {
 
 export async function POST(req: Request) {
   try {
-    const formData = await req.formData()
-    const file = formData.get("file") as File | null
-    if (!file) return NextResponse.json({ error: "Arquivo não enviado" }, { status: 400 })
+    // Aceita JSON (entries já parseadas no browser) para evitar limite de tamanho de upload
+    const body = await req.json() as { entries: CashflowEntry[]; filename: string; meta?: unknown }
+    const { entries, filename, meta } = body
 
-    const buffer = await file.arrayBuffer()
-    const { entries, meta } = parseCashflowExcel(buffer)
-
-    if (!entries.length) {
+    if (!entries?.length) {
       return NextResponse.json(
         { error: "Nenhum dado encontrado na planilha. Verifique a aba e a estrutura do arquivo." },
         { status: 422 }
@@ -38,8 +35,8 @@ export async function POST(req: Request) {
 
     const cashflow = await prisma.cashflowData.upsert({
       where: { sessionId },
-      create: { sessionId, filename: file.name, entries: entries as unknown as import("@prisma/client").Prisma.InputJsonValue },
-      update: { filename: file.name, entries: entries as unknown as import("@prisma/client").Prisma.InputJsonValue, uploadedAt: new Date() },
+      create: { sessionId, filename, entries: entries as unknown as import("@prisma/client").Prisma.InputJsonValue },
+      update: { filename, entries: entries as unknown as import("@prisma/client").Prisma.InputJsonValue, uploadedAt: new Date() },
     })
 
     const res = NextResponse.json({
