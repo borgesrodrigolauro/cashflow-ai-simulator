@@ -25,11 +25,11 @@ export async function POST(req: Request) {
     if (!file) return NextResponse.json({ error: "Arquivo não enviado" }, { status: 400 })
 
     const buffer = await file.arrayBuffer()
-    const entries = parseCashflowExcel(buffer)
+    const { entries, meta } = parseCashflowExcel(buffer)
 
     if (!entries.length) {
       return NextResponse.json(
-        { error: "Nenhum dado encontrado na planilha. Verifique a estrutura." },
+        { error: "Nenhum dado encontrado na planilha. Verifique a aba e a estrutura do arquivo." },
         { status: 422 }
       )
     }
@@ -47,6 +47,7 @@ export async function POST(req: Request) {
       filename: cashflow.filename,
       count: entries.length,
       preview: entries.slice(0, 5),
+      meta,
     })
 
     const cookieHeader = req.headers.get("cookie") ?? ""

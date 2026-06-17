@@ -2,7 +2,39 @@ import * as XLSX from "xlsx"
 import type { CashflowEntry, PaymentCode } from "./types"
 import { parseBRDate, parseBRNumber, formatDateISO } from "./utils"
 
-export function parseCashflowExcel(buffer: ArrayBuffer): CashflowEntry[] {
+export type CashflowColumnMeta = {
+  index: number
+  header: string
+  detected: boolean
+}
+
+export type CashflowParseResult = {
+  entries: CashflowEntry[]
+  meta: {
+    sheetName: string
+    availableSheets: string[]
+    headerRowIndex: number
+    totalDataRows: number
+    columns: {
+      date: CashflowColumnMeta
+      receber: CashflowColumnMeta
+      pagar: CashflowColumnMeta
+      saldo: CashflowColumnMeta
+    }
+  }
+}
+
+function colLetter(idx: number): string {
+  let result = ""
+  let n = idx
+  do {
+    result = String.fromCharCode(65 + (n % 26)) + result
+    n = Math.floor(n / 26) - 1
+  } while (n >= 0)
+  return result
+}
+
+export function parseCashflowExcel(buffer: ArrayBuffer): CashflowParseResult {
   const wb = XLSX.read(buffer, { type: "array", cellDates: false })
 
   // Procurar aba FLUXO Caixa / FLUXO CAIXA
@@ -20,34 +52,43 @@ export function parseCashflowExcel(buffer: ArrayBuffer): CashflowEntry[] {
     raw: true,
   }) as unknown[][]
 
-  // Encontrar linha de cabeçalho (contém "Vencimento" ou "A RECEBER")
+  // Encontrar linha de cabeçalho
   let headerRow = -1
   for (let i = 0; i < Math.min(raw.length, 20); i++) {
     const row = raw[i] as unknown[]
     const rowStr = row.join("|").toUpperCase()
-    if (rowStr.includes("VENCIMENTO") || rowStr.includes("A RECEBER")) {
+    if (
+      rowStr.includes("VENCIMENTO") ||
+      rowStr.includes("A RECEBER") ||
+      rowStr.includes("DATA")
+    ) {
       headerRow = i
       break
     }
   }
+  if (headerRow === -1) headerRow = 3
 
-  if (headerRow === -1) {
-    // Fallback: assume row 3 (índice 3 = linha 4)
-    headerRow = 3
-  }
-
-  // Mapear índices de colunas
   const headers = (raw[headerRow] as unknown[]).map((h) => String(h).trim().toUpperCase())
 
-  const colA = 0 // Vencimento
-  let colK = headers.findIndex((h) => h.includes("RECEBER") || h.includes("A RECEBER"))
-  let colL = headers.findIndex((h) => h.includes("PAGAR") || h.includes("A PAGAR"))
-  let colM = headers.findIndex((h) => h === "SALDO" || h.includes("SALDO DIÁRIO"))
+  const colDate = 0
 
-  // Fallback para posições fixas (col K=10, L=11, M=12)
-  if (colK === -1) colK = 10
-  if (colL === -1) colL = 11
-  if (colM === -1) colM = 12
+  let idxReceber = headers.findIndex(
+    (h) => h.includes("A RECEBER") || (h.includes("RECEBER") && !h.includes("PAGAR"))
+  )
+  let idxPagar = headers.findIndex(
+    (h) => h.includes("A PAGAR") || (h.includes("PAGAR") && !h.includes("RECEBER"))
+  )
+  let idxSaldo = headers.findIndex(
+    (h) => h === "SALDO" || h.includes("SALDO") || h.includes("LÍQUIDO")
+  )
+
+  const detectedReceber = idxReceber !== -1
+  const detectedPagar = idxPagar !== -1
+  const detectedSaldo = idxSaldo !== -1
+
+  if (!detectedReceber) idxReceber = 10
+  if (!detectedPagar) idxPagar = 11
+  if (!detectedSaldo) idxSaldo = 12
 
   const colFornecedor = headers.findIndex((h) => h.includes("NOME") || h.includes("FANTASIA"))
   const colClasse = headers.findIndex((h) => h.includes("CLASSE"))
@@ -59,9 +100,9 @@ export function parseCashflowExcel(buffer: ArrayBuffer): CashflowEntry[] {
 
   for (let i = headerRow + 1; i < raw.length; i++) {
     const row = raw[i] as unknown[]
-    if (!row[colA]) continue
+    if (!row[colDate]) continue
 
-    const rawDate = row[colA]
+    const rawDate = row[colDate]
     const dateVal =
       typeof rawDate === "number"
         ? (() => {
@@ -72,9 +113,9 @@ export function parseCashflowExcel(buffer: ArrayBuffer): CashflowEntry[] {
 
     if (!dateVal || isNaN(dateVal.getTime())) continue
 
-    const receber = parseBRNumber(row[colK] as string | number)
-    const pagar = parseBRNumber(row[colL] as string | number)
-    const saldo = parseBRNumber(row[colM] as string | number)
+    const receber = parseBRNumber(row[idxReceber] as string | number)
+    const pagar = parseBRNumber(row[idxPagar] as string | number)
+    const saldo = parseBRNumber(row[idxSaldo] as string | number)
 
     if (receber === 0 && pagar === 0 && saldo === 0) continue
 
@@ -91,7 +132,33 @@ export function parseCashflowExcel(buffer: ArrayBuffer): CashflowEntry[] {
     })
   }
 
-  return entries
+  return {
+    entries,
+    meta: {
+      sheetName,
+      availableSheets: wb.SheetNames,
+      headerRowIndex: headerRow,
+      totalDataRows: raw.length - headerRow - 1,
+      columns: {
+        date: { index: colDate, header: headers[colDate] || "A", detected: true },
+        receber: {
+          index: idxReceber,
+          header: headers[idxReceber] || `${colLetter(idxReceber)}`,
+          detected: detectedReceber,
+        },
+        pagar: {
+          index: idxPagar,
+          header: headers[idxPagar] || `${colLetter(idxPagar)}`,
+          detected: detectedPagar,
+        },
+        saldo: {
+          index: idxSaldo,
+          header: headers[idxSaldo] || `${colLetter(idxSaldo)}`,
+          detected: detectedSaldo,
+        },
+      },
+    },
+  }
 }
 
 export function parsePaymentCodesExcel(buffer: ArrayBuffer): PaymentCode[] {
