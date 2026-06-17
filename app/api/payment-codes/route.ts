@@ -1,67 +1,95 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/db"
-import { parsePaymentCodesExcel } from "@/lib/excel"
+import { PAYMENT_CODES_SEED } from "@/lib/payment-codes-seed"
 import { v4 as uuidv4 } from "uuid"
 import { buildSessionCookie } from "@/lib/session"
 
-async function resolveSession(req: Request): Promise<string> {
+async function resolveSession(req: Request): Promise<{ sessionId: string; isNew: boolean }> {
   const cookieHeader = req.headers.get("cookie") ?? ""
   const match = cookieHeader.match(/cashflow_session=([^;]+)/)
   const existing = match?.[1]
   if (existing) {
     const s = await prisma.session.findUnique({ where: { id: existing } })
-    if (s) return s.id
+    if (s) return { sessionId: s.id, isNew: false }
   }
   const s = await prisma.session.create({ data: { id: uuidv4() } })
-  return s.id
+  return { sessionId: s.id, isNew: true }
 }
 
-export async function POST(req: Request) {
-  try {
-    const formData = await req.formData()
-    const file = formData.get("file") as File | null
-    if (!file) return NextResponse.json({ error: "Arquivo não enviado" }, { status: 400 })
-
-    const buffer = await file.arrayBuffer()
-    const codes = parsePaymentCodesExcel(buffer)
-
-    if (!codes.length) {
-      return NextResponse.json({ error: "Nenhum código encontrado" }, { status: 422 })
-    }
-
-    const sessionId = await resolveSession(req)
-
-    // Limpar códigos anteriores e inserir novos
-    await prisma.paymentCode.deleteMany({ where: { sessionId } })
+async function ensureSeeded(sessionId: string) {
+  const count = await prisma.paymentCode.count({ where: { sessionId } })
+  if (count === 0) {
     await prisma.paymentCode.createMany({
-      data: codes.map((c) => ({
+      data: PAYMENT_CODES_SEED.map((c) => ({
+        id: uuidv4(),
         sessionId,
         code: c.code,
         description: c.description,
-        category: c.category ?? null,
+        category: c.category,
         type: c.type,
-        parcelas: c.parcelas ?? 1,
+        parcelas: c.parcelas,
       })),
       skipDuplicates: true,
     })
-
-    const res = NextResponse.json({ count: codes.length, preview: codes.slice(0, 5) })
-    const cookieHeader = req.headers.get("cookie") ?? ""
-    const existingSession = cookieHeader.match(/cashflow_session=([^;]+)/)?.[1]
-    if (!existingSession) res.headers.set("Set-Cookie", buildSessionCookie(sessionId))
-    return res
-  } catch (err) {
-    console.error(err)
-    return NextResponse.json({ error: "Erro ao processar arquivo" }, { status: 500 })
   }
 }
 
 export async function GET(req: Request) {
-  const cookieHeader = req.headers.get("cookie") ?? ""
-  const match = cookieHeader.match(/cashflow_session=([^;]+)/)
-  const sessionId = match?.[1]
-  if (!sessionId) return NextResponse.json({ codes: [] })
+  const { sessionId, isNew } = await resolveSession(req)
 
-  const codes = await prisma.paymentCode.findMany({ where: { sessionId } })
-  return NextResponse.json({ codes })
+  await ensureSeeded(sessionId)
+
+  const codes = await prisma.paymentCode.findMany({
+    where: { sessionId },
+    orderBy: [{ category: "asc" }, { code: "asc" }],
+  })
+
+  const res = NextResponse.json({ codes })
+  if (isNew) res.headers.set("Set-Cookie", buildSessionCookie(sessionId))
+  return res
+}
+
+export async function POST(req: Request) {
+  try {
+    const { sessionId, isNew } = await resolveSession(req)
+    const body = await req.json()
+
+    const { code, description, category, type, parcelas } = body as {
+      code: string
+      description: string
+      category?: string
+      type?: string
+      parcelas?: number
+    }
+
+    if (!code?.trim() || !description?.trim()) {
+      return NextResponse.json({ error: "Código e descrição são obrigatórios" }, { status: 400 })
+    }
+
+    const existing = await prisma.paymentCode.findUnique({
+      where: { sessionId_code: { sessionId, code: code.trim().toUpperCase() } },
+    })
+    if (existing) {
+      return NextResponse.json({ error: "Código já existe" }, { status: 409 })
+    }
+
+    const created = await prisma.paymentCode.create({
+      data: {
+        id: uuidv4(),
+        sessionId,
+        code: code.trim().toUpperCase(),
+        description: description.trim(),
+        category: category?.trim() ?? "Outros",
+        type: (type === "receita" ? "receita" : "despesa") as "receita" | "despesa",
+        parcelas: parcelas ?? 1,
+      },
+    })
+
+    const res = NextResponse.json({ code: created })
+    if (isNew) res.headers.set("Set-Cookie", buildSessionCookie(sessionId))
+    return res
+  } catch (err) {
+    console.error(err)
+    return NextResponse.json({ error: "Erro ao criar código" }, { status: 500 })
+  }
 }

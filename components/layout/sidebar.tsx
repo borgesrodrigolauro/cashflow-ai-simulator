@@ -3,13 +3,14 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { cn } from "@/lib/utils"
 import {
-  LayoutDashboard, Upload, FlaskConical, GitCompare, TrendingUp,
+  LayoutDashboard, Upload, FlaskConical, GitCompare, TrendingUp, Tags,
 } from "lucide-react"
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/import", label: "Importar Dados", icon: Upload },
   { href: "/scenarios", label: "Cenários", icon: FlaskConical },
+  { href: "/codes", label: "Códigos de Pagamento", icon: Tags },
   { href: "/compare", label: "Comparar", icon: GitCompare },
 ]
 
